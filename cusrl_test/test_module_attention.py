@@ -9,6 +9,7 @@ from cusrl.module import (
     MultiheadCrossAttention,
     MultiheadSelfAttention,
 )
+from cusrl.module.encoding import RotaryEmbedding
 from cusrl.module.mha import FlashAttention
 from cusrl_test import test_module_consistency
 
@@ -213,3 +214,16 @@ def test_cross_mha_consistency_with_torch(dtype):
 
     assert out_flash.shape == out_torch.shape
     assert torch.allclose(out_flash, out_torch, atol=1e-6, rtol=1e-6)
+
+
+@pytest.mark.skipif(not FlashAttention.is_available(), reason="FlashAttention not available")
+def test_rope_correctness():
+    x = torch.randn(2, 16, 4, 8).to("cuda")
+    qkv = torch.randn(2, 16, 3, 4, 8).to("cuda")
+    module = RotaryEmbedding(head_dim=8, max_seq_len=16).to("cuda")
+    cusrl.config.enable_flash_attention(False)
+    out1_x, out1_qkv = module(x), module.apply_qkv(qkv)
+    cusrl.config.enable_flash_attention(True)
+    out2_x, out2_qkv = module(x), module.apply_qkv(qkv)
+    assert torch.allclose(out1_x, out2_x, atol=1e-5)
+    assert torch.allclose(out1_qkv, out2_qkv, atol=1e-5)

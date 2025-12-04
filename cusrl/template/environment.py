@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from typing import TYPE_CHECKING, Any, Generic, Optional, TypeAlias
 
 import gymnasium as gym
@@ -34,9 +34,9 @@ class EnvironmentSpec:
         action_dim (int):
             Dimension of the action space.
         state_dim (int | None, optional):
-            Dimension of the state space. Defaults to None.
-        reward_dim (int):
-            The dimension of the reward. Defaults to 1.
+            Dimension of the state space. Defaults to ``None``.
+        reward_dim (int, optional):
+            The dimension of the reward. Defaults to ``1``.
 
         # Additional properties
         action_space (gym.spaces.Space | None):
@@ -44,7 +44,7 @@ class EnvironmentSpec:
             the valid actions that can be taken in the environment.
         autoreset (bool):
             Whether the environment automatically resets itself on terminal
-            states inside `Environment.step`.
+            states inside :func:`Environment.step`.
         environment_instance (Environment | None):
             The environment instance associated with the specification. It is
             recommended to define environment specifications in this class as
@@ -71,13 +71,13 @@ class EnvironmentSpec:
         action_denormalization (tuple[Array, Array] | None):
             Tuple of arrays (scale, shift) used for denormalizing the action
             within the environment. If provided, these statistics are applied as
-            an element-wise affine layer as `action = original_action * scale
-            + shift` appended to the actor upon export.
+            an element-wise affine layer as :math:`action = original_action *
+            scale + shift` appended to the actor upon export.
         observation_normalization: (tuple[Array, Array] | None):
             Tuple of arrays (scale, shift) used for normalizing observation
             within the environment. If provided, these statistics are applied as
-            an element- wise affine layer as `observation =
-            original_observation - shift) / scale` prepended to the actor upon
+            an element-wise affine layer as :math:`observation =
+            (original_observation - shift) / scale` prepended to the actor upon
             export.
         state_normalization (tuple[Array, Array] | None):
             Tuple of arrays (scale, shift) used for normalizing state within the
@@ -85,18 +85,22 @@ class EnvironmentSpec:
             element-wise affine layer as `state = (original_state - shift) /
             scale` prepended to the critic upon export. (not implemented yet)
 
-        # State/observation relationships
+        # Observation / state online normalization
+        observation_normalization_excluded_indices (Slice | None):
+            Indices of observation dimensions that are excluded from online
+            normalization.
         observation_is_subset_of_state (Array | Slice | None):
             Definition of the one-to-one correspondence relationship from state
             to observation.
-
-        # Statistical grouping
-        observation_stat_groups (Sequence[tuple[int, int]]):
-            Sequence of (start_idx, end_idx) pairs defining groups of
-            observation dimensions that share statistical properties.
-        state_stat_groups (Sequence[tuple[int, int]]):
-            Sequence of (start_idx, end_idx) pairs defining groups of state
-            dimensions that share statistical properties.
+        observation_stat_groups (Iterable[Slice]):
+            Indices of observation dimensions that shares statistical properties
+            during online normalization.
+        state_normalization_excluded_indices (Slice | None):
+            Indices of state dimensions that are excluded from online
+            normalization.
+        state_stat_groups (Iterable[Slice]):
+            Indices of state dimensions that shares statistical properties
+            during online normalization.
 
         # Imitation
         demonstration_sampler (Callable[[int], Array] | None):
@@ -124,13 +128,15 @@ class EnvironmentSpec:
         mirror_state: Optional["SymmetryDefLike"] = None,
         num_instances: int = 1,
         observation_is_subset_of_state: Array | Slice | None = None,
-        observation_stat_groups: Sequence[tuple[int, int]] = (),
+        observation_stat_groups: Iterable[Slice] = (),
         observation_normalization: tuple[Array, Array] | None = None,
+        observation_normalization_excluded_indices: Slice | None = None,
         observation_space: gym.spaces.Space | None = None,
         reward_dim: int = 1,
         state_dim: int | None = None,
-        state_stat_groups: Sequence[tuple[int, int]] = (),
+        state_stat_groups: Iterable[Slice] = (),
         state_normalization: tuple[Array, Array] | None = None,
+        state_normalization_excluded_indices: Slice | None = None,
         timestep: float | None = None,
         **kwargs,
     ):
@@ -149,25 +155,14 @@ class EnvironmentSpec:
         self.observation_is_subset_of_state = observation_is_subset_of_state
         self.observation_stat_groups = tuple(observation_stat_groups)
         self.observation_normalization = observation_normalization
+        self.observation_normalization_excluded_indices = observation_normalization_excluded_indices
         self.observation_space = observation_space
         self.reward_dim = reward_dim
         self.state_dim = state_dim
         self.state_stat_groups = tuple(state_stat_groups)
         self.state_normalization = state_normalization
+        self.state_normalization_excluded_indices = state_normalization_excluded_indices
         self.timestep = timestep
-
-        if "action_stats" in kwargs:
-            raise ValueError("'action_stats' is removed. Use 'action_denormalization' instead.")
-        if "action_normalization" in kwargs:
-            raise ValueError("'action_normalization' is removed. Use 'action_denormalization' instead.")
-        if "observation_stats" in kwargs:
-            raise ValueError("'observation_stats' is removed. Use 'observation_normalization' instead.")
-        if "observation_denormalization" in kwargs:
-            raise ValueError("'observation_denormalization' is removed. Use 'observation_normalization' instead.")
-        if "state_stats" in kwargs:
-            raise ValueError("'state_stats' is removed. Use 'state_normalization' instead.")
-        if "state_denormalization" in kwargs:
-            raise ValueError("'state_denormalization' is removed. Use 'state_normalization' instead.")
         self.extras = kwargs
 
     def __getattr__(self, key: str):
@@ -223,13 +218,15 @@ class Environment(ABC, Generic[ArrayType]):
         mirror_state: Optional["SymmetryDefLike"] = None,
         num_instances: int = 1,
         observation_is_subset_of_state: Array | Slice | None = None,
-        observation_stat_groups: Sequence[tuple[int, int]] = (),
+        observation_stat_groups: Iterable[Slice] = (),
         observation_normalization: tuple[Array, Array] | None = None,
+        observation_normalization_excluded_indices: Slice | None = None,
         observation_space: gym.spaces.Space | None = None,
         reward_dim: int = 1,
         state_dim: int | None = None,
-        state_stat_groups: Sequence[tuple[int, int]] = (),
+        state_stat_groups: Iterable[Slice] = (),
         state_normalization: tuple[Array, Array] | None = None,
+        state_normalization_excluded_indices: Slice | None = None,
         timestep: float | None = None,
         **kwargs: Any,
     ):
@@ -253,11 +250,13 @@ class Environment(ABC, Generic[ArrayType]):
             observation_is_subset_of_state=observation_is_subset_of_state,
             observation_stat_groups=observation_stat_groups,
             observation_normalization=observation_normalization,
+            observation_normalization_excluded_indices=observation_normalization_excluded_indices,
             observation_space=observation_space,
             reward_dim=reward_dim,
             state_dim=state_dim,
             state_stat_groups=state_stat_groups,
             state_normalization=state_normalization,
+            state_normalization_excluded_indices=state_normalization_excluded_indices,
             timestep=timestep,
             **kwargs,
         )
@@ -276,13 +275,14 @@ class Environment(ABC, Generic[ArrayType]):
 
         Returns:
         - observation (ArrayType):
-            Observations of reset instances with shape `[Ni, Do]`, where `Ni` is
-            the number of reset instances and `Do` is the observation dimension.
+            Observations of reset instances of shape :math:`(Ni, Do)`, where
+            :math:`Ni` is the number of reset instances and :math:`Do` is the
+            observation dimension.
         - state (ArrayType | None):
-            States of reset instances with shape `[Ni, Ds]`, where `Ds` is the
-            state dimension. If the environment does not have privileged
-            observations, the state should be None, which means the states are
-            equal to the observations.
+            States of reset instances of shape :math:`(Ni, Ds)`, where
+            :math:`Ds` is the state dimension. If the environment does not have
+            privileged information, the state should be ``None``, which means
+            the states are the same as the observations.
         - info (dict[str, Nested[ArrayType]]):
             Additional information dict for reset instances as named arrays.
         """

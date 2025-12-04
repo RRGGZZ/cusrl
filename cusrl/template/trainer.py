@@ -3,6 +3,8 @@ import pickle
 import subprocess
 import sys
 from collections.abc import Callable, Iterable
+from dataclasses import dataclass, fields
+from typing import Any, Literal
 
 import git
 import numpy as np
@@ -79,6 +81,21 @@ class EnvironmentStats:
             return 0.0
         return self.len_buffer[: self.num_episodes].mean().item()
 
+    def state_dict(self) -> dict:
+        return {
+            "episode_rew": self.episode_rew.clone(),
+            "episode_len": self.episode_len.clone(),
+            "rew_buffer": self.rew_buffer.clone(),
+            "len_buffer": self.len_buffer.clone(),
+            "num_episodes": self.num_episodes,
+            "total_steps": self.total_steps,
+        }
+
+    def load_state_dict(self, state_dict: dict):
+        if not state_dict:
+            return
+        self.total_steps = state_dict["total_steps"]
+
 
 def save_version_info(output_dir: str, workspace: str | None = None):
     workspace_str: str = os.getcwd() if workspace is None else os.path.abspath(workspace)
@@ -106,6 +123,88 @@ def save_version_info(output_dir: str, workspace: str | None = None):
         except git.GitError:
             version = "unknown"
         f.write(version)
+
+
+@dataclass
+class TrainerFactory:
+    environment_factory: Environment.Factory | None = None
+    agent_factory: Agent.Factory | None = None
+    num_iterations: int | None = None
+    save_interval: int | None = None
+    checkpoint_path: str | None = None
+    callbacks: Iterable[Callable[["Trainer"], None]] = ()
+
+    max_iterations: int | None = None  # For compatibility with IsaacLab environments
+    experiment_name: str | None = None  # For compatibility with IsaacLab environments
+    run_name: str | None = None  # For compatibility with rsl_rl configurations
+
+    def __init_subclass__(cls):
+        """Enables direct assignment of default values to dataclass fields
+        without the need for annotating again."""
+        super().__init_subclass__()
+        for field in fields(cls):
+            if field.name in cls.__annotations__:  # will be processed by dataclass
+                continue
+            if (value := getattr(cls, field.name, None)) is None:
+                continue
+            field.default = value
+            try:
+                delattr(cls, field.name)
+            except AttributeError:
+                pass
+
+    def __call__(
+        self,
+        environment: Environment | Environment.Factory | None = None,
+        agent_factory: Agent.Factory | None = None,
+        logger_factory: LoggerFactoryLike | None = None,
+        num_iterations: int | None = None,
+        init_iteration: int | None = None,
+        save_interval: int | None = None,
+        checkpoint_path: str | None | Literal[False] = False,
+        verbose: bool = True,
+        callbacks: Iterable[Callable[["Trainer"], None]] = (),
+        agent_overrides: dict[str, Any] | None = None,
+    ) -> "Trainer":
+        if environment is None:
+            if self.environment_factory is None:
+                raise ValueError("'environment' should be provided if 'environment_factory' is not set.")
+            environment = self.environment_factory
+        if agent_factory is None:
+            if self.agent_factory is None:
+                raise ValueError("'agent_factory' should be provided if not set on initialization.")
+            agent_factory = self.agent_factory
+        if agent_overrides is not None:
+            agent_factory.override(**agent_overrides)
+        if num_iterations is None:
+            if self.num_iterations is not None:
+                num_iterations = self.num_iterations
+            elif self.max_iterations is not None:
+                num_iterations = self.max_iterations
+            if num_iterations is None:
+                raise ValueError(
+                    "'num_iterations' should be provided if neither 'num_iterations' "
+                    "nor 'max_iterations' is set on initialization."
+                )
+        if save_interval is None:
+            if self.save_interval is None:
+                raise ValueError("'save_interval' should be provided if not set on initialization.")
+            save_interval = self.save_interval
+        if checkpoint_path is False:
+            checkpoint_path = self.checkpoint_path
+        callbacks = list(self.callbacks) + list(callbacks)
+
+        return Trainer(
+            environment=environment,
+            agent_factory=agent_factory,
+            logger_factory=logger_factory,
+            num_iterations=num_iterations,
+            init_iteration=init_iteration,
+            save_interval=save_interval,
+            checkpoint_path=checkpoint_path,
+            verbose=verbose,
+            callbacks=callbacks,
+        )
 
 
 class Trainer:
@@ -151,6 +250,8 @@ class Trainer:
             Execute the training loop until reaching num_iterations.
     """
 
+    Factory = TrainerFactory
+
     def __init__(
         self,
         environment: Environment | Environment.Factory,
@@ -165,6 +266,7 @@ class Trainer:
     ):
         self.environment = environment if isinstance(environment, Environment) else environment()
         self.agent: Agent = agent_factory.from_environment(self.environment)
+        self.stats = EnvironmentStats(self.environment.num_instances, self.environment.spec.reward_dim)
         self.verbose = verbose and is_main_process()
         self.iteration = self._load_checkpoint(checkpoint_path)
         if init_iteration is not None:
@@ -178,7 +280,6 @@ class Trainer:
         for callback in self.callbacks:
             callback(self)
 
-        self.stats = EnvironmentStats(self.environment.num_instances, self.environment.spec.reward_dim)
         self.timer = Timer()
         self._save_trial_info()
 
@@ -250,6 +351,7 @@ class Trainer:
                 "agent": self.agent.state_dict(),
                 "environment": self.environment.state_dict(),
                 "iteration": self.iteration,
+                "stats": self.stats.state_dict(),
             },
             iteration=self.iteration,
         )
@@ -261,8 +363,9 @@ class Trainer:
             return 0
         trial = Trial(checkpoint_path, verbose=distributed.is_main_process())
         checkpoint = trial.load_checkpoint(map_location=self.agent.device)
-        self.environment.load_state_dict(checkpoint["environment"])
         self.agent.load_state_dict(checkpoint["agent"])
+        self.environment.load_state_dict(checkpoint["environment"])
+        self.stats.load_state_dict(checkpoint.get("stats", {}))
 
         if self.verbose:
             print(f"Checkpoint loaded from '{checkpoint_path}'.")

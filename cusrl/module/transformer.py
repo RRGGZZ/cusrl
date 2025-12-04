@@ -17,7 +17,8 @@ class FeedForwardFactory(ModuleFactory["FeedForward"]):
     activation_fn: type[nn.Module] = nn.GELU
     dropout: float = 0.0
 
-    def __call__(self, input_dim: int, output_dim: int | None = None):
+    def __call__(self, input_dim: int | None = None, output_dim: int | None = None):
+        assert input_dim is not None
         return FeedForward(
             input_dim=input_dim,
             feedforward_dim=self.feedforward_dim,
@@ -79,6 +80,7 @@ class TransformerEncoderLayerFactory(ModuleFactory["TransformerEncoderLayer"]):
     num_heads: int
     feedforward_dim: int | None = None
     activation_fn: type[nn.Module] = nn.GELU
+    rope_base: float | None = None
     dropout: float = 0.0
     dtype: torch.dtype = torch.float16
     gate_type: str | None = "residual"
@@ -90,6 +92,7 @@ class TransformerEncoderLayerFactory(ModuleFactory["TransformerEncoderLayer"]):
             num_heads=self.num_heads,
             feedforward_dim=self.feedforward_dim,
             activation_fn=self.activation_fn,
+            rope_base=self.rope_base,
             dropout=self.dropout,
             dtype=self.dtype,
             gate_type=self.gate_type,
@@ -108,6 +111,7 @@ class TransformerEncoderLayer(Module):
         num_heads: int,
         feedforward_dim: int | None = None,
         activation_fn: type[nn.Module] = nn.GELU,
+        rope_base: float | None = None,
         dropout: float = 0.0,
         dtype: torch.dtype = torch.float16,
         gate_type: str | None = "residual",
@@ -134,6 +138,7 @@ class TransformerEncoderLayer(Module):
         self.self_attn = MultiheadSelfAttention(
             embed_dim=embed_dim,
             num_heads=num_heads,
+            rope_base=rope_base,
             dropout=dropout,
             dtype=dtype,
         )

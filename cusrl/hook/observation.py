@@ -10,11 +10,11 @@ from cusrl.module.normalizer import mean_var_count
 from cusrl.template import ActorCritic, Hook
 from cusrl.utils.typing import Slice
 
-__all__ = ["ObservationNanToZero", "ObservationNormalization"]
+__all__ = ["ObservationNanToNum", "ObservationNormalization"]
 
 
-class ObservationNanToZero(Hook[ActorCritic]):
-    """Replaces NaN values with zero in observations and states.
+class ObservationNanToNum(Hook[ActorCritic]):
+    """Replaces NaN values with number in observations and states.
 
     This hook sanitizes incoming tensors to prevent NaNs from propagating
     through the pipeline. It operates in-place on the following fields when
@@ -22,24 +22,37 @@ class ObservationNanToZero(Hook[ActorCritic]):
 
     - ``"observation"`` and ``"state"`` during :func:`pre_act`;
     - ``"next_observation"`` and ``"next_state"`` during :func:`post_step`.
+
+    Args:
+        nan (float, optional):
+            The value to replace NaNs with. Defaults to ``0.0``.
+        posinf (float, optional):
+            The value to replace positive infinity with. Defaults to ``0.0``.
+        neginf (float, optional):
+            The value to replace negative infinity with. Defaults to ``0.0``.
     """
 
-    @staticmethod
-    def nan_to_zero_(tensor: Tensor | None):
+    def __init__(self, nan: float = 0.0, posinf: float = 0.0, neginf: float = 0.0):
+        super().__init__()
+        self.nan = nan
+        self.posinf = posinf
+        self.neginf = neginf
+
+    def nan_to_num_(self, tensor: Tensor | None):
         if tensor is not None:
-            tensor.nan_to_num_(nan=0.0, posinf=0.0, neginf=0.0)
+            tensor.nan_to_num_(nan=self.nan, posinf=self.posinf, neginf=self.neginf)
 
     def pre_act(self, transition):
         observation = transition.get("observation")
         state = transition.get("state")
-        self.nan_to_zero_(cast(Tensor | None, observation))
-        self.nan_to_zero_(cast(Tensor | None, state))
+        self.nan_to_num_(cast(Tensor | None, observation))
+        self.nan_to_num_(cast(Tensor | None, state))
 
     def post_step(self, transition):
         next_observation = transition.get("next_observation")
         next_state = transition.get("next_state")
-        self.nan_to_zero_(cast(Tensor | None, next_observation))
-        self.nan_to_zero_(cast(Tensor | None, next_state))
+        self.nan_to_num_(cast(Tensor | None, next_observation))
+        self.nan_to_num_(cast(Tensor | None, next_state))
 
 
 class ObservationNormalization(Hook[ActorCritic]):
@@ -105,29 +118,38 @@ class ObservationNormalization(Hook[ActorCritic]):
 
     def init(self):
         # Retrieve and normalize the subset index spec
-        env_spec = self.agent.environment_spec
-        observation_is_subset_of_state = env_spec.observation_is_subset_of_state
-        if observation_is_subset_of_state is not None:
+        spec = self.agent.environment_spec
+        observation_dim = self.agent.observation_dim
+        self._mirror_observation = spec.mirror_observation
+        self._mirror_state = spec.mirror_state
+
+        if (observation_is_subset_of_state := spec.observation_is_subset_of_state) is not None:
             if not self.agent.has_state:
                 raise ValueError("'observation_is_subset_of_state' is set but state is not defined.")
             # Convert numpy or list indices to a tensor for consistent indexing
             if isinstance(observation_is_subset_of_state, (np.ndarray, Sequence)):
                 observation_is_subset_of_state = self.agent.to_tensor(np.asarray(observation_is_subset_of_state))
-        self._observation_is_subset_of_state = observation_is_subset_of_state
-
-        observation_dim = self.agent.observation_dim
-        if self._observation_is_subset_of_state is not None:
-            self.register_module("observation_rms", self._make_rms(observation_dim))
+            self._observation_is_subset_of_state = observation_is_subset_of_state
+            self.register_module("observation_rms", RunningMeanStd(observation_dim))
         else:
-            observation_rms = self._make_rms(observation_dim, self.max_count, env_spec.observation_stat_groups)
+            observation_rms = RunningMeanStd(
+                observation_dim,
+                max_count=self.max_count,
+                groups=spec.observation_stat_groups,
+                excluded_indices=spec.observation_normalization_excluded_indices,
+            )
             self.register_module("observation_rms", observation_rms)
+
         if self.agent.has_state:
-            state_rms = self._make_rms(self.agent.state_dim, self.max_count, env_spec.state_stat_groups)
+            state_rms = RunningMeanStd(
+                self.agent.state_dim,
+                max_count=self.max_count,
+                groups=spec.state_stat_groups,
+                excluded_indices=spec.state_normalization_excluded_indices,
+            )
             self.register_module("state_rms", state_rms)
         else:
             self.state_rms = None
-        self._mirror_observation = env_spec.mirror_observation
-        self._mirror_state = env_spec.mirror_state
 
     def pre_act(self, transition):
         observation = cast(Tensor, transition["observation"])
@@ -154,17 +176,6 @@ class ObservationNormalization(Hook[ActorCritic]):
             assert next_state is not None
             transition["normalized_next_state"] = self.state_rms.normalize(next_state)
             transition.register_alias("next_state", "normalized_next_state")
-
-    def _make_rms(
-        self,
-        num_channels: int,
-        max_count: int | None = None,
-        stat_groups: tuple[tuple[int, int], ...] = (),
-    ):
-        normalizer = RunningMeanStd(num_channels, max_count=max_count).to(self.agent.device)
-        for group in stat_groups:
-            normalizer.register_stat_group(*group)
-        return normalizer
 
     def _update_rms(
         self,

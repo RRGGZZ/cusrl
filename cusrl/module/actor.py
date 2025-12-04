@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from typing import Any
 
 from torch import Tensor
 
@@ -16,7 +17,7 @@ class ActorFactory(ModuleFactory["Actor"]):
     distribution_factory: DistributionFactoryLike
     latent_dim: int | None = None
 
-    def __call__(self, input_dim: int | None, output_dim: int) -> "Actor":
+    def __call__(self, input_dim: int | None = None, output_dim: int | None = None):
         backbone = self.backbone_factory(input_dim, self.latent_dim)
         distribution = self.distribution_factory(backbone.output_dim, output_dim)
         return Actor(backbone, distribution)
@@ -52,11 +53,13 @@ class Actor(Module):
         self.backbone: Module = backbone.rnn_compatible()
         self.distribution: Distribution = distribution
         self.latent_dim = self.backbone.output_dim
+        self.backbone_kwargs: dict[str, Any] = {}
+        self.distribution_kwargs: dict[str, Any] = {}
 
     def to_distributed(self):
         if not self.is_distributed:
             self.is_distributed = True
-            self.backbone = self.backbone.to_distributed()
+            self.backbone = self.backbone.to_distributed()  # type: ignore[assignment]
             self.distribution = self.distribution.to_distributed()
         return self
 
@@ -188,13 +191,13 @@ class Actor(Module):
             observation,
             memory=memory,
             done=done,
-            **(backbone_kwargs or {}),
+            **((backbone_kwargs or {}) | self.backbone_kwargs),
         )
 
         dist_params = self.distribution(
             latent,
             observation=observation,
-            **(distribution_kwargs or {}),
+            **((distribution_kwargs or {}) | self.distribution_kwargs),
         )
 
         self.intermediate_repr["backbone.output"] = latent
@@ -213,25 +216,25 @@ class Actor(Module):
         latent, memory = self.backbone(
             observation,
             memory=memory,
-            **(backbone_kwargs or {}),
+            **((backbone_kwargs or {}) | self.backbone_kwargs),
         )
         if deterministic:
             dist_params = self.distribution(
                 latent,
                 observation=observation,
-                **(distribution_kwargs or {}),
+                **((distribution_kwargs or {}) | self.distribution_kwargs),
             )
             action = self.distribution.determine(
                 latent,
                 observation=observation,
-                **(distribution_kwargs or {}),
+                **((distribution_kwargs or {}) | self.distribution_kwargs),
             )
             logp = self.distribution.compute_logp(dist_params, action)
         else:
             dist_params, (action, logp) = self.distribution.sample(
                 latent,
                 observation=observation,
-                **(distribution_kwargs or {}),
+                **((distribution_kwargs or {}) | self.distribution_kwargs),
             )
 
         self.intermediate_repr["backbone.output"] = latent

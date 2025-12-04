@@ -1,9 +1,10 @@
 from dataclasses import dataclass
+from typing import Any
 
 import torch
 from torch import nn
 
-from cusrl.module.module import Module, ModuleFactory, ModuleFactoryLike
+from cusrl.module.module import LayerFactoryLike, Module, ModuleFactory, ModuleFactoryLike
 from cusrl.module.normalizer import RunningMeanStd
 from cusrl.utils import make_distributed
 from cusrl.utils.dict_utils import prefix_dict_keys
@@ -15,15 +16,14 @@ __all__ = ["Value"]
 @dataclass(slots=True)
 class ValueFactory(ModuleFactory["Value"]):
     backbone_factory: ModuleFactoryLike
+    value_head_factory: LayerFactoryLike = nn.Linear  # type: ignore[assignment]
     latent_dim: int | None = None
     action_aware: bool = False
 
-    def __call__(self, input_dim: int | None, output_dim: int = 1) -> "Value":
-        return Value(
-            self.backbone_factory(input_dim, self.latent_dim),
-            value_dim=output_dim,
-            action_aware=self.action_aware,
-        )
+    def __call__(self, input_dim: int | None = None, output_dim: int | None = 1):
+        backbone = self.backbone_factory(input_dim, self.latent_dim)
+        value_head = self.value_head_factory(backbone.output_dim, output_dim)
+        return Value(backbone, value_head, action_aware=self.action_aware)
 
 
 class Value(Module):
@@ -36,8 +36,8 @@ class Value(Module):
     Args:
         backbone (Module):
             The network used to extract features from the input.
-        value_dim (int, optional):
-            The dimension of the output value. Defaults to ``1``.
+        value_head (nn.Module):
+            The head layer used to compute the final value.
         action_aware (bool, optional):
             If ``True``, the module becomes an action-value function
             (Q-function) by concatenating the state and action before passing
@@ -46,26 +46,22 @@ class Value(Module):
 
     Factory = ValueFactory
 
-    def __init__(
-        self,
-        backbone: Module,
-        value_dim: int = 1,
-        action_aware: bool = False,
-    ):
+    def __init__(self, backbone: Module, value_head: nn.Module, action_aware: bool = False):
         super().__init__(
             input_dim=backbone.input_dim,
-            output_dim=value_dim,
+            output_dim=value_head(torch.zeros(1, backbone.output_dim)).numel(),
             is_recurrent=backbone.is_recurrent,
         )
         self.backbone: Module = backbone.rnn_compatible()
-        self.value_head = nn.Linear(backbone.output_dim, value_dim)
+        self.value_head = value_head
         self.value_rms: RunningMeanStd | None = None
         self.action_aware: bool = action_aware
+        self.backbone_kwargs: dict[str, Any] = {}
 
     def to_distributed(self):
         if not self.is_distributed:
             self.is_distributed = True
-            self.backbone = self.backbone.to_distributed()
+            self.backbone = self.backbone.to_distributed()  # type: ignore[assignment]
             self.value_head = make_distributed(self.value_head)
         return self
 
@@ -94,12 +90,13 @@ class Value(Module):
             if action is None:
                 raise ValueError("Action must be provided when 'action_aware' is True.")
             state = torch.cat([state, action], dim=-1)
+        kwargs.update(self.backbone_kwargs)
         latent, memory = self.backbone(state, memory=memory, done=done, **kwargs)
         self.intermediate_repr["backbone.output"] = latent
         self.intermediate_repr.update(prefix_dict_keys(self.backbone.intermediate_repr, "backbone."))
         return self.value_head(latent), memory
 
-    def step_memory(self, state, memory=None, **kwargs):
+    def step_memory(self, state, memory: Memory = None, **kwargs):
         return self.backbone.step_memory(state, memory, **kwargs)
 
     def reset_memory(self, memory: Memory, done: Slice | torch.Tensor | None = None):

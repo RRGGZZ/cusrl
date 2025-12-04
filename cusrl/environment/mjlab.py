@@ -1,35 +1,27 @@
-import argparse
-import importlib
-from collections.abc import Sequence
-from dataclasses import dataclass, fields
-from typing import Any, cast
+from typing import cast
 
 import gymnasium as gym
 import torch
 
 import cusrl.utils
-from cusrl.template import Environment, Trainer
-from cusrl.utils import from_dict, to_dict
+from cusrl.template import Environment
 from cusrl.utils.typing import Slice
 
 __all__ = [
-    "IsaacLabEnvAdapter",
-    "IsaacLabEnvLauncher",
-    "TrainerCfg",
-    "make_isaaclab_env",
+    "MjlabEnvAdapter",
 ]
 
 
-class IsaacLabEnvAdapter(Environment[torch.Tensor]):
-    """Wraps an IsaacLab environment to conform to the cusrl.Environment
+class MjlabEnvAdapter(Environment[torch.Tensor]):
+    """Wraps an mjlab environment to conform to the cusrl.Environment
     interface."""
 
     def __init__(self, wrapped: gym.Env):
-        from isaaclab.envs import DirectRLEnv, ManagerBasedRLEnv
+        from mjlab.envs import ManagerBasedRlEnv
 
         self.wrapped = wrapped
-        self.unwrapped: DirectRLEnv | ManagerBasedRLEnv = wrapped.unwrapped
-        self.device = self.unwrapped.device
+        self.unwrapped: ManagerBasedRlEnv = wrapped.unwrapped
+        self.device = torch.device(self.unwrapped.device)
         self.metrics = cusrl.utils.Metrics()
         super().__init__(
             num_instances=self.unwrapped.num_envs,
@@ -37,12 +29,8 @@ class IsaacLabEnvAdapter(Environment[torch.Tensor]):
             action_dim=self._get_action_dim(),
             state_dim=self._get_state_dim(),
             autoreset=True,
-            demonstration_sampler=getattr(self.unwrapped, "collect_reference_motions", None),
             final_state_is_missing=True,
         )
-
-        # Avoid terminal color issues
-        print("\033[0m", end="")
 
     def __del__(self):
         if hasattr(self, "wrapped"):
@@ -110,7 +98,7 @@ class IsaacLabEnvAdapter(Environment[torch.Tensor]):
         reward = cast(torch.Tensor, reward).unsqueeze(-1)
         terminated = cast(torch.Tensor, terminated).unsqueeze(-1)
         truncated = cast(torch.Tensor, truncated).unsqueeze(-1)
-        extras = cast(dict, extras)
+        extras = cast(dict, extras).copy()
         self.metrics.record(**extras.pop("log", {}))
         return observation, state, reward, terminated, truncated, observation_dict | extras
 
@@ -118,79 +106,3 @@ class IsaacLabEnvAdapter(Environment[torch.Tensor]):
         metrics = self.metrics.summary()
         self.metrics.clear()
         return metrics
-
-
-class IsaacLabEnvLauncher(IsaacLabEnvAdapter):
-    def __init__(
-        self,
-        id: str,
-        argv: Sequence[str] | None = None,
-        extensions: Sequence[str] = (),
-        **kwargs: Any,
-    ):
-        from isaaclab.app import AppLauncher
-
-        parser = argparse.ArgumentParser(prog="--environment-args", description="IsaacLab environment")
-        parser.add_argument("--num_envs", type=int, metavar="N", help="Number of environments to simulate.")
-        AppLauncher.add_app_launcher_args(parser)
-        args = parser.parse_args(argv or [])
-        args.device = str(cusrl.device())
-        self.app_launcher = AppLauncher(args)
-        self.simulation_app = self.app_launcher.app
-
-        from isaaclab.envs import DirectMARLEnv, multi_agent_to_single_agent
-        from isaaclab_tasks.utils.parse_cfg import load_cfg_from_registry
-
-        for extension in extensions:
-            importlib.import_module(extension)
-
-        env_cfg = load_cfg_from_registry(id, "env_cfg_entry_point")
-        env_cfg.sim.device = args.device
-        if args.num_envs is not None:
-            env_cfg.scene.num_envs = args.num_envs
-        env_cfg.scene.num_envs = max(env_cfg.scene.num_envs // cusrl.utils.distributed.world_size(), 1)
-        wrapped = gym.make(id, cfg=env_cfg, disable_env_checker=True, **kwargs)
-        if isinstance(wrapped, DirectMARLEnv):
-            wrapped = multi_agent_to_single_agent(wrapped)
-        super().__init__(wrapped)
-
-    def __del__(self):
-        super().__del__()
-        if hasattr(self, "simulation_app"):
-            self.simulation_app.close()
-
-
-def make_isaaclab_env(
-    id: str,
-    argv: Sequence[str] | None = None,
-    play: bool = False,
-    **kwargs: Any,
-) -> Environment:
-    if play:
-        ids = id.split("-")
-        ids.insert(-1, "Play")
-        id = "-".join(ids)
-    return IsaacLabEnvLauncher(id, argv, **kwargs)
-
-
-@dataclass
-class TrainerCfg(Trainer.Factory):
-    def __post_init__(self):
-        # Manually set the serialization methods to each instance
-        self.to_dict = self._to_dict
-        self.from_dict = self._update_from_dict
-
-    def _to_dict(self):
-        # Removing the methods temporarily to avoid recursion
-        del self.to_dict
-        data = to_dict(self)
-        self.to_dict = self._to_dict
-        return data
-
-    def _update_from_dict(self, data):
-        # Removing the methods temporarily to avoid recursion
-        del self.from_dict
-        updated_obj = from_dict(self, data)
-        for field in fields(self):
-            setattr(self, field.name, getattr(updated_obj, field.name))
-        self.from_dict = self._update_from_dict
