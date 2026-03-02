@@ -5,6 +5,7 @@ from .advantage import (
 from .amp import AdversarialMotionPrior
 from .condition import ConditionalObjectiveActivation
 from .distillation import PolicyDistillationLoss
+from .fastsac import FastSACLoss
 from .environment_spec import (
     DynamicEnvironmentSpecOverride,
     EnvironmentSpecOverride,
@@ -62,6 +63,7 @@ __all__ = [
     "DynamicEnvironmentSpecOverride",
     "EntropyLoss",
     "EnvironmentSpecOverride",
+    "FastSACLoss",
     "GeneralizedAdvantageEstimation",
     "GradientClipping",
     "HookActivationSchedule",
