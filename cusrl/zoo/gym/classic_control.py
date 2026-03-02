@@ -1,3 +1,4 @@
+import cusrl
 from cusrl.environment import make_gym_env, make_gym_vec
 from cusrl.preset import ppo
 from cusrl.zoo.registry import register_experiment
@@ -139,4 +140,31 @@ register_experiment(
     playing_env_kwargs={"render_mode": "human"},
     num_iterations=50,
     save_interval=25,
+)
+
+register_experiment(
+    environment_name="Pendulum-v1",
+    algorithm_name="fastsac",
+    agent_factory_cls=cusrl.preset.fastsac.AgentFactory,
+    agent_factory_kwargs=dict(
+        num_steps_per_update=1,
+        actor_hidden_dims=(256, 256),
+        critic_hidden_dims=(256, 256),
+        activation_fn="ReLU",
+        lr=3e-4,
+        replay_batches=1,
+        replay_batch_size=256,
+        normalize_observation=True,
+        gamma=0.99,
+        tau=0.005,
+        alpha=0.2,
+        tune_alpha=True,
+        max_grad_norm=1.0,
+    ),
+    training_env_factory=make_gym_vec,
+    training_env_kwargs={"num_envs": 8},
+    playing_env_factory=make_gym_env,
+    playing_env_kwargs={"render_mode": "human"},
+    num_iterations=200,
+    save_interval=50,
 )

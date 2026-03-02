@@ -82,6 +82,7 @@ CusRL provides a modular and extensible framework for RL with the following key 
 
 - [Action Smoothness Constraint](https://onlinelibrary.wiley.com/doi/10.1002/rob.70028)
 - [Adversarial Motion Prior (AMP)](https://dl.acm.org/doi/10.1145/3450626.3459670)
+- FastSAC (Fast Soft Actor-Critic)
 - [Generalized Advantage Estimation (GAE)](https://arxiv.org/abs/1506.02438)
   with [distinct lambda values](https://proceedings.neurips.cc/paper_files/paper/2022/hash/e95475f5fb8edb9075bf9e25670d4013-Abstract-Conference.html)
 - [Privileged Training (Policy Distillation)](https://www.science.org/doi/10.1126/scirobotics.abc5986)
